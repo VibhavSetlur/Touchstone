@@ -17,7 +17,7 @@
     "@octokit/webhooks-types": "^7.6.0",
     "execa": "^9.5.0",
     "marked": "^14.1.0",
-    "zod": "^3.23.0"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
