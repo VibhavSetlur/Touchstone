@@ -1,5 +1,5 @@
 # Triage UI image.
-FROM node:22-slim AS builder
+FROM node:26-slim AS builder
 WORKDIR /build
 RUN corepack enable
 COPY package.json tsconfig.json next.config.mjs ./
@@ -8,7 +8,7 @@ COPY components ./components
 RUN pnpm install --frozen-lockfile || npm install
 RUN npm run build || pnpm build
 
-FROM node:22-slim
+FROM node:26-slim
 RUN useradd --uid 1001 --create-home touchstone
 USER touchstone
 WORKDIR /home/touchstone/app

@@ -8,7 +8,7 @@ COPY pyproject.toml uv.lock* ./
 COPY packages/ packages/
 RUN uv sync --frozen --no-dev --extra all
 
-FROM node:22-slim AS jsbuilder
+FROM node:26-slim AS jsbuilder
 WORKDIR /build
 RUN corepack enable
 COPY packages/touchstone-github/package.json packages/touchstone-github/tsconfig.json ./
