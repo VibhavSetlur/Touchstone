@@ -1,7 +1,7 @@
 # Touchstone GitHub App — bundles the Python CLI + the TS app together so it
 # can spawn `touchstone` locally without a network round-trip.
 
-FROM python:3.12-slim AS pybuilder
+FROM python:3.14-slim AS pybuilder
 WORKDIR /build
 RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock* ./
@@ -16,7 +16,7 @@ RUN pnpm install --frozen-lockfile || npm install
 COPY packages/touchstone-github/src ./src
 RUN npm run build || pnpm build
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 1001 --create-home touchstone
