@@ -16,7 +16,7 @@
     "probot": "^13.4.0",
     "@octokit/webhooks-types": "^7.6.0",
     "execa": "^9.5.0",
-    "marked": "^14.1.0",
+    "marked": "^18.0.4",
     "zod": "^3.23.0"
   },
   "devDependencies": {
