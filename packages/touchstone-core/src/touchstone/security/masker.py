@@ -1,8 +1,15 @@
 """Result masker.
 
-Applies the configured strategy (redact / hash / tokenize / partial / synthetic)
-to every PII finding. The original `QueryResult` is replaced with a copy that
+Applies the configured strategy (redact / hash / tokenize / partial /
+synthetic / never_leaves) to every PII finding AND to every operator-declared
+sensitive column. The original `QueryResult` is replaced with a copy that
 the LLM is allowed to see.
+
+The `never_leaves` strategy is the strongest: the cell is replaced with a
+type-only descriptor (`<TEXT len=437>`), so the LLM knows the column exists
+and has data, but never sees a byte of it. Used for medical records,
+free-text PII dumps, and other "if the LLM provider trains on this we're
+in trouble" columns.
 """
 
 from __future__ import annotations
@@ -49,6 +56,23 @@ def _partial(value: Any, entity_type: str) -> str:
     return "*" * (len(s) - 4) + s[-4:]
 
 
+def _never_leaves(value: Any, entity_type: str) -> str:
+    """Strongest tier: return only the type + length, never the bytes."""
+    if value is None:
+        return "<NULL>"
+    if isinstance(value, str):
+        return f"<TEXT len={len(value)}>"
+    if isinstance(value, (int, float)):
+        return f"<{type(value).__name__}>"
+    return f"<{type(value).__name__} len={len(str(value))}>"
+
+
+def _allow(value: Any, entity_type: str) -> Any:
+    """No-op masker. Used by the sensitivity catalog when a column is
+    explicitly exempt from masking."""
+    return value
+
+
 def _synthetic(value: Any, entity_type: str) -> str:
     """Stable synthetic value — same input → same output, so the LLM can
     reason about uniqueness/joins without seeing the real value. Backed by
@@ -77,28 +101,81 @@ STRATEGIES: dict[str, Strategy] = {
     "tokenize": _tokenize,
     "partial": _partial,
     "synthetic": _synthetic,
+    "never_leaves": _never_leaves,
+    "allow": _allow,
 }
 
 
-@dataclass(slots=True)
+@dataclass
 class Masker:
+    """Note: no `slots=True` — the tier cache (`_tc`) is set lazily in
+    `apply()` and would fail under slots."""
+
     default_strategy: str = "redact"
     # per-entity overrides: {"EMAIL": "tokenize", "PERSON": "synthetic"}
     per_entity: dict[str, str] | None = None
     # per-column overrides: {"users.email": "partial"}
     per_column: dict[str, str] | None = None
+    # sensitivity catalog for the active connection (operator-declared).
+    # Overrides per_entity/per_column for matched columns.
+    sensitivity: Any = None
 
-    def apply(self, result: QueryResult, findings: list[PIIFinding]) -> MaskedResult:
-        if not findings:
+    def apply(self, result: QueryResult, findings: list[PIIFinding],
+              qualified_column_names: dict[str, str] | None = None) -> MaskedResult:
+        """Apply masking.
+
+        `qualified_column_names` maps `column.name` → fully-qualified name
+        like `users.email`. Used to look up sensitivity-catalog rules.
+        Defaults to {column.name: column.name} for backward compat.
+        """
+        qmap = qualified_column_names or {c.name: c.name for c in result.columns}
+
+        # Compute sensitivity-tier-driven findings (covers columns the PII
+        # detector might miss entirely — like `user_notes` containing a
+        # free-form medical history).
+        sensitivity_findings: list[PIIFinding] = []
+        if self.sensitivity is not None:
+            for col in result.columns:
+                qname = qmap.get(col.name, col.name)
+                sample = result.rows[0][_idx(result, col.name)] if result.rows else None
+                tier = self.sensitivity.tier_for(qname, col.type, sample)
+                if tier != "allow":
+                    for row_idx in range(len(result.rows)):
+                        sensitivity_findings.append(PIIFinding(
+                            column=col.name, row_index=row_idx,
+                            detector="sensitivity_catalog",
+                            entity_type="OPERATOR_DECLARED",
+                            confidence=1.0,
+                            span=None,
+                        ))
+                        # Stash the tier on a side map keyed by (col_name).
+                        self._tier_cache[col.name] = tier
+
+        all_findings = findings + sensitivity_findings
+        if not all_findings:
             return MaskedResult(result=result, findings=[], strategy_applied={})
 
         # Build a {(row_idx, col_name) -> (entity_type, strategy)} map.
+        # Sensitivity tier wins on STRATEGY (operator declaration > heuristic).
+        # PII detection wins on LABEL (more specific entity type).
+        # Two passes: PII first sets the cell, sensitivity then upgrades the
+        # strategy if it's stricter.
         by_cell: dict[tuple[int, str], tuple[str, str]] = {}
-        for f in findings:
-            strategy = self._pick_strategy(f)
-            # Last write wins; that's OK — multiple detectors firing on the
-            # same cell still need only one masking pass.
-            by_cell[(f.row_index, f.column)] = (f.entity_type, strategy)
+        STRICTNESS = {"allow": 0, "partial": 1, "synthetic": 2, "tokenize": 3,
+                      "hash": 4, "redact": 5, "never_leaves": 6}
+        for f in all_findings:
+            if f.detector != "sensitivity_catalog":
+                by_cell[(f.row_index, f.column)] = (
+                    f.entity_type, self._pick_strategy(f),
+                )
+        for f in all_findings:
+            if f.detector == "sensitivity_catalog":
+                tier = self._tier_cache.get(f.column, self.default_strategy)
+                existing = by_cell.get((f.row_index, f.column))
+                if existing is None:
+                    by_cell[(f.row_index, f.column)] = (f.entity_type, tier)
+                elif STRICTNESS.get(tier, 0) > STRICTNESS.get(existing[1], 0):
+                    by_cell[(f.row_index, f.column)] = (existing[0], tier)
 
         col_index = {c.name: i for i, c in enumerate(result.columns)}
         new_rows: list[tuple[Any, ...]] = []
@@ -127,7 +204,15 @@ class Masker:
             engine=result.engine,
             sql_executed=result.sql_executed,
         )
-        return MaskedResult(result=masked, findings=findings, strategy_applied=strategy_applied)
+        return MaskedResult(result=masked, findings=all_findings,
+                            strategy_applied=strategy_applied)
+
+    @property
+    def _tier_cache(self) -> dict[str, str]:
+        # Cache lives on the Masker instance; reset each call to apply().
+        if not hasattr(self, "_tc"):
+            self._tc = {}
+        return self._tc
 
     def _pick_strategy(self, f: PIIFinding) -> str:
         if self.per_column and f.column in self.per_column:
@@ -135,3 +220,10 @@ class Masker:
         if self.per_entity and f.entity_type in self.per_entity:
             return self.per_entity[f.entity_type]
         return self.default_strategy
+
+
+def _idx(result: QueryResult, col_name: str) -> int:
+    for i, c in enumerate(result.columns):
+        if c.name == col_name:
+            return i
+    return 0

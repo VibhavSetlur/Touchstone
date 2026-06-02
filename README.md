@@ -169,19 +169,43 @@ Adding a connector is ~150 lines — see
    credential references — never plaintext. Enforced by config loader,
    MCP schemas, browser session, and connector layer.
    See [`docs/security/ai-credential-blindness.md`](docs/security/ai-credential-blindness.md).
-2. **Default-deny everywhere.** Read-only by default. Row caps. SQL
-   allow-list. Web origin allow-list. Consent gates for sensitive ops.
-3. **PII never reaches the LLM unmasked.** Microsoft Presidio + regex +
-   column-name heuristics + custom detectors, configurable per connection.
-4. **Append-only hash-chained audit log.** Every tool call, every web step,
-   every notification. Sinks to file / S3 / Splunk HEC / Datadog / OTLP.
-5. **The trust boundary is structural, not conventional.** QA capabilities
-   cannot import connectors directly; a Ruff custom rule + integration test
+2. **MFA-aware browser automation.** `touchstone session bootstrap` runs
+   a headed login once per credential; Touchstone captures the session,
+   AES-GCM-256 encrypts it, replays it headlessly. Mid-session expiry
+   is auto-detected and refused. The AI never sees cookies or keys.
+   See [`docs/integrations/mfa-bootstrap.md`](docs/integrations/mfa-bootstrap.md).
+3. **Operator-declared sensitivity catalog** + **local NER detector**
+   catches what regex/Presidio misses in unstructured fields. The
+   `never_leaves` tier returns only `<TEXT len=437>` — the LLM knows
+   data exists but never sees a byte. See
+   [`docs/security/sensitivity-catalog.md`](docs/security/sensitivity-catalog.md).
+4. **Cost guard with EXPLAIN preflight.** Static SQL guard refuses
+   cross-joins and auto-injects LIMIT; EXPLAIN preflight (including
+   BigQuery dry-run for exact bytes) rejects queries above row/byte
+   thresholds; per-assistant concurrency cap (default 4) stops a
+   panicked AI from spawning a fleet of deep scans.
+   See [`docs/security/cost-guard.md`](docs/security/cost-guard.md).
+5. **Per-tenant isolation** keyed by `(tenant_id, connection_name)`.
+   Connector instances never cross tenants; manifest gates which
+   connections each tenant can address; audit records are tenant-tagged.
+   See [`docs/security/multi-tenant.md`](docs/security/multi-tenant.md).
+6. **Snapshot transactions** for TOCTOU defense. `gateway.snapshot()`
+   pins a consistent view (Postgres REPEATABLE READ, Snowflake/BQ/
+   Databricks Time Travel) so multi-step QA workflows see the same data
+   start-to-finish. See [`docs/security/snapshot-transactions.md`](docs/security/snapshot-transactions.md).
+7. **Append-only hash-chained audit log** with size-based rotation.
+   `touchstone audit verify-rotated` walks across rotated files
+   end-to-end. Sinks to file / S3 / Splunk HEC / Datadog / OTLP.
+8. **Knowledge store refuses PII dumps at write** — defense against
+   future vector-search poisoning.
+9. **The trust boundary is structural, not conventional.** QA
+   capabilities cannot import connectors directly; AST-scan tests
    enforce it.
-6. **Local-first deployment.** Runs entirely in your VPC. No phone-home,
-   no vendor-hosted control plane required.
+10. **Local-first deployment.** Runs entirely in your VPC. No phone-home.
 
-Full threat model: [`SECURITY.md`](SECURITY.md).
+Full threat model: [`SECURITY.md`](SECURITY.md). Hardening review against
+the audit findings:
+[`docs/security/architectural-vulnerabilities.md`](docs/security/architectural-vulnerabilities.md).
 
 ## Comparisons
 

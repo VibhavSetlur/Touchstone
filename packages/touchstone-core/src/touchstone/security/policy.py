@@ -16,6 +16,7 @@ For enterprises that have standardized on OPA, an `opa_bridge.py` module
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
@@ -136,8 +137,6 @@ def _evaluate_condition(expr: str, context: dict[str, Any]) -> bool:
     operators. We do NOT use eval() because rule files come from operators
     and the policy engine must be hardened.
     """
-    import ast
-
     tree = ast.parse(expr, mode="eval")
     return bool(_evaluate(tree.body, context))
 

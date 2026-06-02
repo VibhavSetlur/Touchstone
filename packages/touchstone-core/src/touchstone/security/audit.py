@@ -34,20 +34,40 @@ class AuditSink(ABC):
 
 
 class FileSink(AuditSink):
-    """One JSONL file per day by default. Atomic appends (single open(), one
-    write() per record). Hash-chained — see AuditLogger."""
+    """Rotating JSONL file sink. Atomic appends + rotation by size.
 
-    def __init__(self, path: str | Path) -> None:
+    Rotation policy: when the current file exceeds `rotate_bytes`, rename
+    to `{path}.{timestamp}` and start a new file. Old files are NEVER
+    deleted by the sink — operators are responsible for archival /
+    retention. This is deliberate: silently dropping audit data would
+    violate the "we never lose evidence" property.
+    """
+
+    def __init__(self, path: str | Path, *, rotate_bytes: int = 64 * 1024 * 1024) -> None:
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.rotate_bytes = rotate_bytes
         self._lock = threading.Lock()
 
     def write(self, record: AuditRecord) -> None:
         line = json.dumps(_to_jsonable(record), separators=(",", ":")) + "\n"
-        with self._lock, self.path.open("a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
+        with self._lock:
+            self._maybe_rotate()
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+
+    def _maybe_rotate(self) -> None:
+        if not self.path.exists() or self.path.stat().st_size < self.rotate_bytes:
+            return
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        rotated = self.path.with_name(f"{self.path.name}.{ts}")
+        try:
+            self.path.rename(rotated)
+        except OSError:
+            # If another process beat us to it, fall through and append.
+            pass
 
 
 class S3Sink(AuditSink):
@@ -177,21 +197,30 @@ def _to_jsonable(record: AuditRecord, exclude: set[str] | None = None) -> dict[s
     return d
 
 
-def verify_chain(path: Path) -> tuple[bool, int, str | None]:
+def verify_chain(path: Path, *, start_from: str | None = None) -> tuple[bool, int, str | None]:
     """Walk the file, recompute each record's hash, and report the first
-    broken link. Returns (is_valid, records_seen, first_error)."""
+    broken link. Returns (is_valid, records_seen, first_error).
 
-    last = AuditLogger.GENESIS
+    Streams line-by-line — works on multi-GB logs without loading them
+    into memory. `start_from` (optional record hash) lets you resume
+    verification from a known-good point, e.g. after a rotation."""
+    last = start_from or AuditLogger.GENESIS
     seen = 0
     with path.open() as f:
         for line in f:
             seen += 1
+            line = line.rstrip("\n")
+            if not line:
+                continue
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 return False, seen, f"record {seen}: invalid JSON"
             if rec.get("prev_record_hash") != last:
-                return False, seen, f"record {seen}: prev_hash mismatch"
+                return False, seen, (
+                    f"record {seen}: prev_hash mismatch "
+                    f"(saw {rec.get('prev_record_hash')!r}, expected {last!r})"
+                )
             expected = rec.pop("record_hash", "")
             payload = json.dumps(rec, separators=(",", ":"), sort_keys=True).encode("utf-8")
             computed = "sha256:" + hashlib.sha256(payload).hexdigest()
@@ -199,3 +228,24 @@ def verify_chain(path: Path) -> tuple[bool, int, str | None]:
                 return False, seen, f"record {seen}: record_hash mismatch"
             last = expected
     return True, seen, None
+
+
+def verify_rotated_chain(paths: list[Path]) -> tuple[bool, int, str | None]:
+    """Verify a sequence of rotated audit files in order. Each file's
+    first record's `prev_record_hash` must equal the previous file's last
+    `record_hash`. Returns aggregated (is_valid, total_records, first_error)."""
+    last = AuditLogger.GENESIS
+    total = 0
+    for p in paths:
+        ok, n, err = verify_chain(p, start_from=last)
+        total += n
+        if not ok:
+            return False, total, f"{p.name}: {err}"
+        if n > 0:
+            with p.open() as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    rec = json.loads(line)
+                    last = rec.get("record_hash", last)
+    return True, total, None

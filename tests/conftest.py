@@ -30,7 +30,7 @@ def basic_config(duckdb_path):
         connections={
             "test-duck": ConnectionConfig(
                 name="test-duck", engine=Engine.DUCKDB, database=duckdb_path,
-                read_only=False, tags=["dev"],
+                read_only=True, tags=["dev"],
             ),
         },
         security=SecurityConfig(

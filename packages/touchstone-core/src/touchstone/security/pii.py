@@ -181,8 +181,11 @@ def _luhn(digits: str) -> bool:
 
 # -- Detector orchestrator --------------------------------------------------
 
-@dataclass(slots=True)
+@dataclass
 class PIIDetector:
+    """Note: no `slots=True` — we attach `_detectors` / `_column_detector`
+    lazily in __post_init__, which would fail under slots."""
+
     threshold: float = 0.4
     enabled: list[str] = field(default_factory=lambda: ["column_name", "regex"])
     # `regex` is shorthand — expands to all regex-based detectors.
@@ -267,3 +270,59 @@ class _PresidioDetector(Detector):
         top = max(results, key=lambda r: r.score)
         self.entity_type = top.entity_type
         return float(top.score)
+
+
+@register("local_ner")
+class LocalNERDetector(Detector):
+    """Detects person/org/location names via a LOCAL transformer NER model.
+
+    Crucial for catching PII in unstructured fields (support tickets, notes,
+    bug bodies) where regex / column-name heuristics miss everything. Model
+    runs entirely in-process — no external API calls — so unmasked data
+    never leaves the Touchstone host.
+
+    Default model: `dslim/bert-base-NER` (CC-BY 4.0, ~440MB). Operators can
+    swap via `TOUCHSTONE_NER_MODEL`. Loads lazily — pulled only when the
+    detector is first used.
+    """
+
+    entity_type = "LOCAL_NER"
+
+    def __init__(self) -> None:
+        self._pipeline = None
+        # Don't load the model in __init__ — happens on first confidence() call.
+
+    def _ensure_loaded(self) -> None:
+        if self._pipeline is not None:
+            return
+        try:
+            from transformers import pipeline  # type: ignore[import-untyped]
+        except ImportError as e:
+            raise RuntimeError(
+                "local_ner detector requires `transformers` + `torch`. "
+                "Install with: pip install 'touchstone-core[pii-local-ner]'"
+            ) from e
+        import os
+        model = os.environ.get("TOUCHSTONE_NER_MODEL", "dslim/bert-base-NER")
+        self._pipeline = pipeline(
+            "token-classification", model=model, aggregation_strategy="simple",
+        )
+
+    def confidence(self, value: str) -> float:
+        if not isinstance(value, str) or len(value) < 3:
+            return 0.0
+        try:
+            self._ensure_loaded()
+            results = self._pipeline(value[:4096])  # cap to keep latency bounded
+        except Exception:
+            return 0.0
+        if not results:
+            return 0.0
+        top = max(results, key=lambda r: r["score"])
+        # Map NER tags to our entity types.
+        tag = top["entity_group"]
+        self.entity_type = {
+            "PER": "PERSON", "ORG": "ORGANIZATION",
+            "LOC": "LOCATION", "MISC": "MISC_ENTITY",
+        }.get(tag, "LOCAL_NER")
+        return float(top["score"])

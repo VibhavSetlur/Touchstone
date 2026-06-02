@@ -232,19 +232,25 @@ def audit_tail(audit_file, lines):
 
 @cli.command()
 @click.argument("steps_path", type=click.Path(exists=True))
+@click.option("--credential", default=None,
+              help="Use the encrypted stored session for this credential.")
 @click.pass_context
-def browse(ctx, steps_path):
+def browse(ctx, steps_path, credential):
     """Run a sequence of browser steps from a JSON file."""
     cfg = Config.load(ctx.obj["config_path"])
     from touchstone.web.browser import BrowserSession, BrowserStep, CredentialRef
+    from touchstone.web.session_store import SessionStore
     from touchstone.secrets import resolve
     from dataclasses import asdict
 
     steps = json.loads(Path(steps_path).read_text())
+    session_store = SessionStore(base_dir=cfg.web.session_store_dir) if credential else None
     with BrowserSession(
         allowed_origins=cfg.web.allowed_origins,
         secret_resolver=resolve,
         credentials_config=cfg.web.credentials,
+        session_store=session_store,
+        active_credential=credential,
         context_dir=cfg.web.context_dir,
         headless=cfg.web.headless,
     ) as br:
@@ -481,6 +487,113 @@ def llm_ask(ctx, prompt):
         sys.exit(1)
     resp = llm.chat([LLMMessage(role="user", content=prompt)])
     console.print(resp.content)
+
+
+# -- session bootstrap (MFA / SSO) -----------------------------------------
+
+@cli.group()
+def session():
+    """Manage browser session state (MFA / SSO bootstrap)."""
+
+
+@session.command("bootstrap")
+@click.argument("credential")
+@click.option("--headless/--headed", default=False,
+              help="Run headed (default) so the operator can complete MFA.")
+@click.pass_context
+def session_bootstrap(ctx, credential, headless):
+    """Open a browser, let the operator log in (including MFA), save
+    encrypted session state for headless reuse.
+
+    Requires TOUCHSTONE_SESSION_KEY to be set. The AI never sees this key
+    or the captured cookies.
+    """
+    cfg = Config.load(ctx.obj["config_path"])
+    from touchstone.web.bootstrap import bootstrap_session
+    spec = cfg.web.credentials.get(credential)
+    if spec is None:
+        console.print(f"[red]No credential {credential!r} in config.[/red]")
+        sys.exit(1)
+    result = bootstrap_session(
+        credential_name=credential, credential_config=spec,
+        base_dir=cfg.web.session_store_dir, headless=headless,
+    )
+    console.print(f"[green]Saved session for {credential}[/green]")
+    console.print(f"  path:    {result.session_path}")
+    console.print(f"  cookies: {result.captured_cookies}, origins: {result.captured_origins}")
+    console.print(f"  url:     {result.final_url}")
+
+
+@session.command("list")
+@click.pass_context
+def session_list(ctx):
+    """List credentials with stored sessions."""
+    cfg = Config.load(ctx.obj["config_path"])
+    from touchstone.web.session_store import SessionStore
+    ss = SessionStore(base_dir=cfg.web.session_store_dir)
+    names = ss.list_sessions()
+    if not names:
+        console.print("[yellow]No stored sessions.[/yellow]")
+        return
+    for n in names:
+        console.print(f"  {n}")
+
+
+@session.command("delete")
+@click.argument("credential")
+@click.pass_context
+def session_delete(ctx, credential):
+    """Delete a stored session (forces re-bootstrap next time)."""
+    cfg = Config.load(ctx.obj["config_path"])
+    from touchstone.web.session_store import SessionStore
+    SessionStore(base_dir=cfg.web.session_store_dir).delete(credential)
+    console.print(f"[green]deleted session for {credential}[/green]")
+
+
+# -- doctor ----------------------------------------------------------------
+
+@cli.command()
+@click.pass_context
+def doctor(ctx):
+    """Diagnose common misconfigurations."""
+    from touchstone.diagnostics import run_doctor
+    report = run_doctor(ctx.obj["config_path"])
+    failed = 0
+    for c in report.checks:
+        marker = "[green]ok[/green]   " if c.ok else "[red]fail[/red] "
+        console.print(f"  {marker} {c.name:30s}  {c.detail}")
+        if not c.ok:
+            failed += 1
+            if c.fix:
+                console.print(f"           [dim]fix: {c.fix}[/dim]")
+    if failed:
+        console.print(f"\n[red]{failed} check(s) failed.[/red]")
+        sys.exit(1)
+    console.print(f"\n[green]all {len(report.checks)} checks passed.[/green]")
+
+
+# -- audit verify rotated --------------------------------------------------
+
+@audit.command("verify-rotated")
+@click.option("--dir", "audit_dir", default="~/.touchstone",
+              type=click.Path(), help="Directory containing audit.jsonl + rotated files.")
+@click.option("--base", default="audit.jsonl",
+              help="Base name (rotations are appended as base.<ts>).")
+def audit_verify_rotated(audit_dir, base):
+    """Verify chain across a rotated audit log set."""
+    from touchstone.security.audit import verify_rotated_chain
+    d = Path(audit_dir).expanduser()
+    files = sorted(d.glob(f"{base}.*")) + [d / base]
+    files = [f for f in files if f.exists()]
+    if not files:
+        console.print(f"[red]No audit files in {d}[/red]")
+        sys.exit(1)
+    ok, total, err = verify_rotated_chain(files)
+    if ok:
+        console.print(f"[green]Chain valid across {len(files)} file(s).[/green] {total} records.")
+    else:
+        console.print(f"[red]Chain broken: {err}[/red]")
+        sys.exit(2)
 
 
 # -- serve-mcp -------------------------------------------------------------

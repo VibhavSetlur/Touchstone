@@ -86,7 +86,24 @@ class WebConfig:
     allowed_origins: list[str] = field(default_factory=list)
     headless: bool = True
     context_dir: str | None = None
+    session_store_dir: str = "~/.touchstone/web-sessions"
     credentials: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class CostConfig:
+    max_estimated_rows: int = 100_000_000
+    max_estimated_bytes: int = 10 * 1024 ** 3
+    refuse_cross_join: bool = True
+    require_limit_on_large: bool = True
+    auto_inject_limit: int = 10_000
+    concurrent_cap_per_assistant: int = 4
+    large_tables: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TenantConfig:
+    tenants: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -116,6 +133,10 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
+    cost: CostConfig = field(default_factory=CostConfig)
+    tenants: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-connection sensitivity catalogs: {connection_name: {tier: [cols]}}
+    sensitivity: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def validate(self) -> None:
         if not self.connections:
@@ -156,9 +177,15 @@ def _from_dict(data: dict[str, Any]) -> Config:
     notif_raw = data.get("notifications", {})
     notifications = NotificationsConfig(channels=notif_raw.get("channels", {}))
 
+    cost = CostConfig(**{k: v for k, v in data.get("cost", {}).items()
+                          if k in CostConfig.__dataclass_fields__})
+    tenants = data.get("tenants", {}) or {}
+    sensitivity = data.get("sensitivity", {}) or {}
+
     return Config(
         connections=connections, security=security, assistants=assistants,
         web=web, llm=llm, knowledge=knowledge, notifications=notifications,
+        cost=cost, tenants=tenants, sensitivity=sensitivity,
     )
 
 

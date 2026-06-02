@@ -63,6 +63,9 @@ from touchstone.types import TableRef
 from touchstone.web.browser import BrowserSession, BrowserStep, CredentialRef
 
 
+_active_snapshots: dict[str, list] = {}
+
+
 def _build_app(config: Config):
     from mcp.server.fastmcp import FastMCP
 
@@ -72,11 +75,16 @@ def _build_app(config: Config):
     notifier = Notifier.from_config(config.notifications.channels)
     github_api = GitHubAPI()
 
-    def _browser() -> BrowserSession:
+    from touchstone.web.session_store import SessionStore
+    session_store = SessionStore(base_dir=config.web.session_store_dir)
+
+    def _browser(active_credential: str | None = None) -> BrowserSession:
         return BrowserSession(
             allowed_origins=config.web.allowed_origins,
             secret_resolver=resolve,
             credentials_config=config.web.credentials,
+            session_store=session_store if active_credential else None,
+            active_credential=active_credential,
             context_dir=config.web.context_dir,
             headless=config.web.headless,
         )
@@ -101,7 +109,7 @@ def _build_app(config: Config):
     def list_tables(connection: str, schema: str | None = None) -> list[dict[str, str]]:
         """List tables in a connection."""
         out = gateway.execute(ToolCallContext(
-            assistant_id=_aid(), assistant_session=_sid(),
+            assistant_id=_aid(), assistant_session=_sid(), tenant_id=_tid(),
             tool="list_tables", connection=connection,
             sql=("SELECT table_schema, table_name FROM information_schema.tables"
                  + (f" WHERE table_schema = '{schema}'" if schema else "")),
@@ -114,7 +122,7 @@ def _build_app(config: Config):
         """Describe a table's columns."""
         sf = f"AND table_schema = '{schema}'" if schema else ""
         out = gateway.execute(ToolCallContext(
-            assistant_id=_aid(), assistant_session=_sid(),
+            assistant_id=_aid(), assistant_session=_sid(), tenant_id=_tid(),
             tool="describe_table", connection=connection,
             sql=(f"SELECT column_name, data_type, is_nullable FROM information_schema.columns "
                  f"WHERE table_name = '{table}' {sf} ORDER BY ordinal_position"),
@@ -124,9 +132,14 @@ def _build_app(config: Config):
 
     @app.tool()
     def query_database(connection: str, sql: str) -> dict[str, Any]:
-        """Run a read-only SQL query (or JSON spec for Mongo). PII auto-masked."""
+        """Run a read-only SQL query (or JSON spec for Mongo). PII auto-masked.
+
+        Note: the cost guard may auto-inject LIMIT, refuse cross-joins, or
+        reject queries that EXPLAIN estimates above the configured row/byte
+        limits. Any rewrite or warning lands in `warnings`.
+        """
         out = gateway.execute(ToolCallContext(
-            assistant_id=_aid(), assistant_session=_sid(),
+            assistant_id=_aid(), assistant_session=_sid(), tenant_id=_tid(),
             tool="query_database", connection=connection, sql=sql,
         ))
         return {
@@ -136,7 +149,41 @@ def _build_app(config: Config):
             "truncated": out.masked.result.truncated,
             "pii_findings_summary": out.audit_record.pii_summary,
             "latency_ms": out.masked.result.latency_ms,
+            "snapshot_ts": out.snapshot_ts,
+            "warnings": out.warnings,
         }
+
+    @app.tool()
+    def snapshot_begin(connection: str) -> dict[str, str]:
+        """Open a snapshot transaction on `connection` and pin it for
+        subsequent calls from the same assistant. TOCTOU defense — all
+        queries within the snapshot see one consistent view.
+
+        Returns the snapshot timestamp. Call `snapshot_end` when done.
+        """
+        cm = gateway.snapshot(tenant_id=_tid(), connection=connection)
+        snap = cm.__enter__()
+        _active_snapshots.setdefault(_aid(), []).append(cm)
+        return {"connection": connection, "snapshot_ts": snap.snapshot_ts,
+                "engine": snap.engine.value}
+
+    @app.tool()
+    def snapshot_end(connection: str) -> dict[str, str]:
+        """Close the most recently opened snapshot."""
+        stack = _active_snapshots.get(_aid(), [])
+        if not stack:
+            return {"status": "no_active_snapshot"}
+        cm = stack.pop()
+        cm.__exit__(None, None, None)
+        return {"status": "closed", "connection": connection}
+
+    @app.tool()
+    def doctor() -> list[dict[str, Any]]:
+        """Self-diagnose Touchstone's configuration. Read-only; safe."""
+        from touchstone.diagnostics import run_doctor
+        report = run_doctor()
+        return [{"name": c.name, "ok": c.ok, "detail": c.detail, "fix": c.fix}
+                for c in report.checks]
 
     @app.tool()
     def profile_table_tool(connection: str, table: str, schema: str | None = None,
@@ -215,21 +262,27 @@ def _build_app(config: Config):
         return sorted(config.web.credentials.keys())
 
     @app.tool()
-    def browse(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    def browse(steps: list[dict[str, Any]],
+                use_stored_session_for: str | None = None) -> dict[str, Any]:
         """Execute a sequence of browser steps in one session.
 
-        Steps: navigate / click / fill / select / press / wait_for_selector /
-        wait_for_url / screenshot / extract_text / extract_table /
-        list_buttons / list_inputs / login.
+        Ops: navigate / click / fill / select / press / wait_for_selector /
+        wait_for_url / wait_for_network_idle / wait_for_stable_rows /
+        screenshot / extract_text / extract_table / list_buttons /
+        list_inputs / login / bi_export / session_status.
 
         For fills against password-looking fields, set `credential: "<ref>"`
         instead of `value: "..."`. Touchstone refuses literal fills on
         password fields.
 
-        Returns a list of step results; sensitive values are scrubbed.
+        If `use_stored_session_for` is set to a credential name, the session
+        loads the encrypted storage_state captured by `touchstone session
+        bootstrap`. This is the supported path for MFA-protected sites.
+
+        Returns step results; sensitive values are scrubbed.
         """
         results = []
-        with _browser() as br:
+        with _browser(active_credential=use_stored_session_for) as br:
             for raw in steps:
                 cred = raw.pop("credential", None)
                 step = BrowserStep(
@@ -242,6 +295,33 @@ def _build_app(config: Config):
         return {"steps": results}
 
     @app.tool()
+    def list_stored_sessions() -> list[str]:
+        """Return credentials with a bootstrapped session. The AI uses this
+        to know which sites it can hit without prompting for re-bootstrap."""
+        return session_store.list_sessions()
+
+    @app.tool()
+    def session_is_valid(credential: str) -> dict[str, Any]:
+        """Probe whether the stored session for a credential is still usable.
+        Loads the session, navigates to the credential's login_url, checks
+        whether we land on a login page. Returns {valid: bool, reason: str}."""
+        spec = config.web.credentials.get(credential)
+        if spec is None:
+            return {"valid": False, "reason": f"no credential {credential!r}"}
+        try:
+            with _browser(active_credential=credential) as br:
+                from touchstone.web.session_store import looks_like_login_page
+                br._page.goto(spec.get("login_url") or spec.get("home_url") or "about:blank",
+                              wait_until="domcontentloaded", timeout=15_000)
+                title = br._page.title()
+                if looks_like_login_page(br._page.url, title):
+                    return {"valid": False, "reason": "landed on login page; re-bootstrap needed",
+                            "final_url": br._page.url}
+                return {"valid": True, "final_url": br._page.url}
+        except Exception as e:
+            return {"valid": False, "reason": str(e)}
+
+    @app.tool()
     def verify_dashboard(
         dashboard_url: str, credential: str | None, table_selector: str,
         connection: str, sql: str, key_column: str, value_columns: list[str],
@@ -251,7 +331,7 @@ def _build_app(config: Config):
         from touchstone.playbooks.dashboard_verify import DashboardVerify
         pb = DashboardVerify(gateway=gateway, browser_factory=_browser)
         return _to_jsonable(pb.run(
-            assistant_id=_aid(), assistant_session=_sid(),
+            assistant_id=_aid(), assistant_session=_sid(), tenant_id=_tid(),
             dashboard_url=dashboard_url, credential=credential,
             table_selector=table_selector, connection=connection, sql=sql,
             key_column=key_column, value_columns=value_columns,
@@ -370,7 +450,7 @@ def _build_app(config: Config):
                     if k in getattr(cls, "__dataclass_fields__", {})}
         pb = cls(**accepted)
         report = pb.run(
-            assistant_id=_aid(), assistant_session=_sid(),
+            assistant_id=_aid(), assistant_session=_sid(), tenant_id=_tid(),
             **params,
         )
         return _to_jsonable(report)

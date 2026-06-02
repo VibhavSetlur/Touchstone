@@ -1,12 +1,24 @@
 """SQLite-backed knowledge store.
 
 One file (`~/.touchstone/knowledge.db` by default). Operator-owned, AI-readable
-(via MCP) and AI-writable (with audit). Designed to be diffable / portable —
-`sqlite3 knowledge.db .dump` produces a text snapshot you can check into a
-private repo.
+(via MCP) and AI-writable (with audit).
 
-Optional vector index lives in `knowledge.vector` (separate module) — it's
-opt-in because it pulls in a much larger dep tree (sentence-transformers).
+## What the store WILL NOT accept
+
+The store is intentionally for **metadata**, not warehouse data. The
+write guard refuses notes whose body matches any of:
+  - >= 5 emails OR >= 5 phone numbers in one body
+  - >= 3 Luhn-validated card numbers
+  - body length > MAX_NOTE_BODY_BYTES (default 16 KiB)
+
+Why this guard exists: notes are free-form operator text, not PII-scanned
+at write time. If we ever add a vector index over notes (see
+`knowledge/vector.md` for the policy), an attacker with access to the
+embeddings can partially reconstruct the original strings. So the store
+NEVER becomes a place where unmasked PII lives.
+
+If you genuinely need to record more, attach it to a file outside the
+store and reference the path from the note.
 """
 
 from __future__ import annotations
@@ -151,6 +163,7 @@ class KnowledgeStore:
 
     # -- notes ----
     def add_note(self, note: Note) -> Note:
+        _guard_content(note.body)
         note.created_at = note.created_at or datetime.now(UTC).isoformat()
         cur = self._conn.execute(
             "INSERT INTO notes(key, body, tags, author, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -245,6 +258,7 @@ class KnowledgeStore:
 
     # -- decisions ----
     def add_decision(self, d: Decision) -> Decision:
+        _guard_content(d.rationale)
         d.decided_at = d.decided_at or datetime.now(UTC).isoformat()
         cur = self._conn.execute(
             "INSERT INTO decisions(title, rationale, decided_at, decided_by, affects) "
@@ -285,3 +299,55 @@ class KnowledgeStore:
 
     def close(self) -> None:
         self._conn.close()
+
+
+# ----- content guard ----------------------------------------------------
+
+MAX_NOTE_BODY_BYTES = 16 * 1024
+
+
+class KnowledgeContentError(Exception):
+    """The knowledge store refused content that looks like raw row data."""
+
+
+def _guard_content(body: str) -> None:
+    import re
+    if body is None:
+        return
+    if len(body.encode("utf-8")) > MAX_NOTE_BODY_BYTES:
+        raise KnowledgeContentError(
+            f"body too large ({len(body)} chars > {MAX_NOTE_BODY_BYTES}). "
+            "Knowledge entries are for metadata, not data dumps. Reference "
+            "a file path instead."
+        )
+    emails = re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", body)
+    if len(emails) >= 5:
+        raise KnowledgeContentError(
+            f"body contains {len(emails)} email addresses. Knowledge store is "
+            "for context, not PII. Summarize and reference instead of pasting."
+        )
+    phones = re.findall(r"\b\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b", body)
+    if len(phones) >= 5:
+        raise KnowledgeContentError(
+            f"body contains {len(phones)} phone-shaped numbers. Refusing."
+        )
+    cc_candidates = re.findall(r"\b(?:\d[ -]*?){13,19}\b", body)
+    luhn_hits = sum(1 for c in cc_candidates if _luhn(re.sub(r"\D", "", c)))
+    if luhn_hits >= 3:
+        raise KnowledgeContentError(
+            "body contains multiple Luhn-validated card numbers. Refusing."
+        )
+
+
+def _luhn(digits: str) -> bool:
+    if len(digits) < 13:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        n = int(d)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0

@@ -102,24 +102,34 @@ _K_SUFFIX = re.compile(r"^([\d,\.]+)\s*([kKmMbB])$")
 
 
 def _compare(rendered: Any, db: Any, tolerance: float) -> str | None:
-    """Return None for "match"; otherwise a severity tag."""
+    """Return None for "match"; otherwise a severity tag.
+
+    Special case: K/M/B-suffixed rendered values ALWAYS report
+    `rounded_truncation` (even when within tolerance) because the rendered
+    form has lost precision the caller probably wants to know about. The
+    original Looker→$10.5K vs $10,500.56 case lives here.
+    """
     if rendered is None and db is None:
         return None
     if rendered is None or db is None:
         return "exact_mismatch"
 
-    # Try numeric comparison first.
+    rendered_has_suffix = (
+        isinstance(rendered, str)
+        and _K_SUFFIX.search(rendered.replace(" ", "")) is not None
+    )
+
+    # Try numeric comparison.
     r_num = _to_number(rendered)
     d_num = _to_number(db)
     if r_num is not None and d_num is not None:
+        if rendered_has_suffix:
+            return "rounded_truncation"
         if d_num == 0:
             return None if r_num == 0 else "exact_mismatch"
         rel = abs(r_num - d_num) / abs(d_num)
         if rel <= tolerance:
             return None
-        # Did the renderer K/M/B-truncate?
-        if isinstance(rendered, str) and _K_SUFFIX.search(rendered.replace(" ", "")):
-            return "rounded_truncation"
         return "exact_mismatch"
 
     # String compare with whitespace + case fold.
