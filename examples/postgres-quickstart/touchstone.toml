@@ -1,0 +1,70 @@
+# Example Touchstone config — postgres-quickstart.
+#
+# Copy to ~/.touchstone/config.toml and `export POSTGRES_PASSWORD=touchstone` first.
+
+# ---------- Database connections ----------
+[connections.local-pg]
+engine = "postgres"
+host = "localhost"
+port = 5432
+database = "shop"
+user = "postgres"
+password_ref = "env://POSTGRES_PASSWORD"
+read_only = true
+tags = ["dev"]
+row_cap = 10000
+byte_cap = 33554432
+timeout_seconds = 30
+
+# ---------- Files (CSV/Excel/Parquet/JSON via DuckDB) ----------
+[connections.local-files]
+engine = "files"
+database = "/tmp/touchstone-data"
+tags = ["dev"]
+
+# ---------- Security ----------
+[security]
+pii_threshold = 0.4
+pii_default_strategy = "redact"
+pii_detectors_enabled = ["column_name", "regex"]
+consent_required_on = ["non_select", "tagged:prod", "tagged:sensitive", "large_result"]
+consent_timeout_seconds = 300
+rate_limit_per_minute = 60
+
+[[security.audit_sinks]]
+kind = "file"
+path = "~/.touchstone/audit.jsonl"
+
+# ---------- Web automation ----------
+[web]
+allowed_origins = ["https://example.com"]
+headless = true
+context_dir = "~/.touchstone/web-context"
+
+# Credentials for browser logins. AI sees only the name `looker_admin`.
+# [web.credentials.looker_admin]
+# username = "env://LOOKER_USER"
+# password = "env://LOOKER_PASSWORD"
+
+# ---------- Knowledge store ----------
+[knowledge]
+path = "~/.touchstone/knowledge.db"
+
+# ---------- LLM (Touchstone's internal use only) ----------
+# `provider = "none"` disables LLM-assisted features. Test-gen falls back to
+# profile-derived heuristics.
+[llm]
+provider = "none"
+model = ""
+
+# ---------- Notifications ----------
+# AI sends to `data-team-alerts` — never to the webhook URL directly.
+# [notifications.channels.data-team-alerts]
+# kind = "slack"
+# webhook_ref = "env://SLACK_WEBHOOK"
+
+# ---------- Assistants → roles ----------
+[assistants]
+claude-code = ["reader"]
+copilot = ["reader"]
+cursor = ["reader"]

@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule: { interval: "weekly" }
+    groups:
+      python-deps: { patterns: ["*"] }
+  - package-ecosystem: "npm"
+    directory: "/packages/touchstone-github"
+    schedule: { interval: "weekly" }
+  - package-ecosystem: "npm"
+    directory: "/packages/touchstone-ui"
+    schedule: { interval: "weekly" }
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule: { interval: "weekly" }
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule: { interval: "weekly" }

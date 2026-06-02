@@ -1,0 +1,37 @@
+# Default policy bundle shipped with Touchstone.
+#
+# These rules apply in addition to (and at lower priority than) the built-in
+# defaults baked into policy.py. Operators may copy this file, edit it, and
+# point `security.policy_files` at their copy.
+#
+# Rule fields:
+#   name        — unique identifier for the audit log
+#   effect      — allow | deny | consent
+#   assistants  — list of assistant id globs (e.g. "claude-*", "copilot")
+#   connections — list of connection-name globs
+#   tools       — list of MCP tool names
+#   when        — optional expression over (sql, tags, tool, etc.)
+#   priority    — lower runs first; first match wins
+
+rules:
+  - name: deny-credential-tables
+    effect: deny
+    when: '"users.password_hash" in sql.touches or "auth.sessions" in sql.touches'
+    priority: 5
+
+  - name: deny-pii-tables-for-non-admin-assistants
+    effect: deny
+    assistants: ["*"]
+    when: '"prod.pii" in tags and "admin" not in tags'
+    priority: 15
+
+  - name: warn-on-large-joins
+    effect: consent
+    when: "sql.joins > 5"
+    priority: 25
+
+  - name: allow-explain-everywhere
+    effect: allow
+    tools: ["query_database"]
+    when: 'sql.kind == "EXPLAIN" or sql.kind == "DESCRIBE"'
+    priority: 50

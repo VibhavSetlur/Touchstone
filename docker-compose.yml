@@ -1,0 +1,84 @@
+# Local development stack — `docker compose up -d` brings up a Postgres,
+# MySQL, MongoDB, MinIO (for S3 audit-sink testing), and a sample-data loader.
+#
+# Profiles:
+#   default   — Postgres + MySQL + MongoDB + MinIO
+#   warehouse — adds ClickHouse + Trino (heavier; for full integration tests)
+#   ui        — adds the Next.js Triage UI
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: touchstone
+      POSTGRES_DB: shop
+    ports: ["5432:5432"]
+    volumes:
+      - ./examples/postgres-quickstart/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 10
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: touchstone
+      MYSQL_DATABASE: shop
+    ports: ["3306:3306"]
+    volumes: [mysqldata:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      retries: 10
+
+  mongodb:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: touchstone
+      MONGO_INITDB_ROOT_PASSWORD: touchstone
+    ports: ["27017:27017"]
+    volumes: [mongodata:/data/db]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: touchstone
+      MINIO_ROOT_PASSWORD: touchstone
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes: [miniodata:/data]
+
+  clickhouse:
+    profiles: ["warehouse"]
+    image: clickhouse/clickhouse-server:24
+    ports: ["8123:8123", "9009:9000"]
+    volumes: [chdata:/var/lib/clickhouse]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+
+  trino:
+    profiles: ["warehouse"]
+    image: trinodb/trino:451
+    ports: ["8080:8080"]
+
+  triage-ui:
+    profiles: ["ui"]
+    build:
+      context: ./packages/touchstone-ui
+      dockerfile: ../../docker/touchstone-ui.Dockerfile
+    environment:
+      TOUCHSTONE_AUDIT_FILE: /audit/audit.jsonl
+    volumes: [audit-shared:/audit]
+    ports: ["3001:3001"]
+
+volumes:
+  pgdata: {}
+  mysqldata: {}
+  mongodata: {}
+  miniodata: {}
+  chdata: {}
+  audit-shared: {}

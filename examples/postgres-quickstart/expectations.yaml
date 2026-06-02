@@ -1,0 +1,16 @@
+# Example data-quality expectations for the `orders` table.
+# Run with: touchstone check local-pg examples/postgres-quickstart/expectations.yaml
+
+table: orders
+expectations:
+  - row_count_between: {min: 1, max: 1000000}
+  - column_not_null: order_id
+  - column_unique: order_id
+  - column_not_null: customer_id
+  - column_not_null: status
+  - column_values_in_set:
+      column: status
+      set: [paid, pending, shipped, refunded, cancelled]
+  - column_values_in_set:
+      column: currency
+      set: [USD, EUR, GBP, JPY, CAD, AUD]

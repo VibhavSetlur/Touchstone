@@ -1,0 +1,66 @@
+# Reference Snowflake enterprise config.
+#
+# Two connections — prod (strict) and dev (relaxed) — plus PII-strict masking,
+# S3 audit sink, Slack consent.
+
+[connections.prod-ro]
+engine = "snowflake"
+user = "touchstone_svc"
+database = "PROD"
+schema = "PUBLIC"
+password_ref = "vault://snowflake/touchstone/keypass"
+read_only = true
+tags = ["prod", "pii-strict"]
+row_cap = 5000
+byte_cap = 33554432
+timeout_seconds = 60
+
+[connections.prod-ro.extra]
+account = "acme-prod"
+warehouse = "TOUCHSTONE_XS"
+role = "TOUCHSTONE_RO"
+auth = "key_pair"
+private_key_file = "/etc/touchstone/snowflake_rsa.p8"
+
+[connections.dev-ro]
+engine = "snowflake"
+user = "touchstone_svc"
+database = "DEV"
+schema = "PUBLIC"
+password_ref = "vault://snowflake/touchstone/keypass"
+read_only = true
+tags = ["dev"]
+
+[connections.dev-ro.extra]
+account = "acme-dev"
+warehouse = "TOUCHSTONE_XS"
+role = "TOUCHSTONE_RO"
+auth = "key_pair"
+private_key_file = "/etc/touchstone/snowflake_rsa.p8"
+
+[security]
+policy_files = ["/etc/touchstone/policies/acme.yaml"]
+pii_threshold = 0.4
+pii_default_strategy = "redact"
+pii_detectors_enabled = ["column_name", "regex", "presidio"]
+consent_required_on = [
+    "non_select", "tagged:prod", "tagged:pii-strict",
+    "large_result", "new_connection_24h",
+]
+consent_timeout_seconds = 600
+rate_limit_per_minute = 30
+
+[[security.audit_sinks]]
+kind = "file"
+path = "/var/log/touchstone/audit.jsonl"
+
+[[security.audit_sinks]]
+kind = "s3"
+bucket = "acme-touchstone-audit"
+prefix = "audit/"
+region = "us-east-1"
+
+[assistants]
+claude-code = ["reader"]
+copilot = ["reader"]
+cursor = ["reader"]

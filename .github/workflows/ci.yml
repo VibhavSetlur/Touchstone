@@ -1,0 +1,89 @@
+name: ci
+
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+
+jobs:
+  python:
+    name: Python (lint + unit + security)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+      - run: uv sync --all-packages --extra all
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Ruff format
+        run: uv run ruff format --check .
+      - name: Pyright
+        run: uv run pyright
+      - name: Unit + security tests
+        run: uv run pytest -m "not integration" -q --cov
+
+  integration:
+    name: Integration (against compose stack)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: touchstone
+          POSTGRES_DB: shop
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-retries 10
+        ports: ["5432:5432"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with: { enable-cache: true }
+      - run: uv sync --all-packages --extra all
+      - name: Seed Postgres
+        env: { PGPASSWORD: touchstone }
+        run: psql -h localhost -U postgres -d shop -f examples/postgres-quickstart/init.sql
+      - name: Integration tests
+        env:
+          POSTGRES_PASSWORD: touchstone
+          POSTGRES_HOST: localhost
+          POSTGRES_DB: shop
+          POSTGRES_USER: postgres
+        run: uv run pytest -m integration -q
+
+  typescript:
+    name: TypeScript (lint + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - name: GitHub App
+        working-directory: packages/touchstone-github
+        run: |
+          pnpm install
+          pnpm lint
+          pnpm build
+      - name: Triage UI
+        working-directory: packages/touchstone-ui
+        run: |
+          pnpm install
+          pnpm lint
+          pnpm typecheck
+
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    needs: [python, typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build MCP image
+        run: docker build -f docker/touchstone-mcp.Dockerfile -t touchstone-mcp:ci .
+      - name: Build CLI image
+        run: docker build -f docker/touchstone-cli.Dockerfile -t touchstone-cli:ci .
