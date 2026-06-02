@@ -51,11 +51,17 @@ class SensitivityCatalog:
 
     Keys are glob patterns like `users.email`, `medical.records.*`,
     `*.notes`. Lookups walk most-specific to least-specific.
+
+    `free_text_default_tier` defaults to `allow` (no auto-masking) — opt
+    in per-connection because the heuristic ("VARCHAR with no length is
+    free-text") is correct for data tables but wrong for metadata queries
+    against information_schema. Operators who want aggressive free-text
+    masking on a connection set it to `redact` explicitly.
     """
 
     rules: dict[str, str] = field(default_factory=dict)
     free_text_threshold_chars: int = 200
-    free_text_default_tier: str = "redact"
+    free_text_default_tier: str = "allow"
     exempt_free_text: list[str] = field(default_factory=list)  # globs
 
     def tier_for(self, qualified_column: str, column_type: str = "",
@@ -102,7 +108,7 @@ class SensitivityCatalog:
         return cls(
             rules=rules,
             free_text_threshold_chars=raw.get("free_text_threshold_chars", 200),
-            free_text_default_tier=raw.get("free_text_default_tier", "redact"),
+            free_text_default_tier=raw.get("free_text_default_tier", "allow"),
             exempt_free_text=raw.get("exempt_free_text", []) or [],
         )
 

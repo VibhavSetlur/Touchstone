@@ -55,11 +55,38 @@ from touchstone_cli.render import (
 console = Console()
 
 
+def _print_version(ctx, _param, value):
+    if not value or ctx.resilient_parsing:
+        return
+    from touchstone import __version__ as core_version
+    from touchstone_cli import __version__ as cli_version
+    click.echo(f"touchstone {cli_version} (core {core_version})")
+    try:
+        from touchstone_mcp import __version__ as mcp_version
+        click.echo(f"touchstone-mcp {mcp_version}")
+    except ImportError:
+        click.echo("touchstone-mcp not installed (run `pip install -e packages/touchstone-mcp`)")
+    ctx.exit()
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.option("--config", "config_path", default=None, envvar="TOUCHSTONE_CONFIG")
+@click.option("--config", "config_path", default=None, envvar="TOUCHSTONE_CONFIG",
+              help="Path to touchstone.toml. Defaults to ~/.touchstone/config.toml.")
+@click.option("--version", "-V", is_flag=True, expose_value=False,
+              is_eager=True, callback=_print_version,
+              help="Show Touchstone version and exit.")
 @click.pass_context
 def cli(ctx: click.Context, config_path: str | None) -> None:
-    """Touchstone — safe, audited QA tooling for data work."""
+    """Touchstone — safe, audited QA tooling for data work.
+
+    Quickstart:
+        touchstone init                 # interactive config wizard
+        touchstone doctor               # diagnose your setup
+        touchstone profile <conn> <tbl> # profile a table
+        touchstone serve-mcp            # run MCP server for AI assistants
+
+    See https://github.com/VibhavSetlur/Touchstone for full docs.
+    """
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path
 

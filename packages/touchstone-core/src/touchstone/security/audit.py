@@ -50,7 +50,8 @@ class FileSink(AuditSink):
         self._lock = threading.Lock()
 
     def write(self, record: AuditRecord) -> None:
-        line = json.dumps(_to_jsonable(record), separators=(",", ":")) + "\n"
+        line = json.dumps(_to_jsonable(record), separators=(",", ":"),
+                          default=_json_default) + "\n"
         with self._lock:
             self._maybe_rotate()
             with self.path.open("a", encoding="utf-8") as f:
@@ -168,7 +169,7 @@ class AuditLogger:
             record.prev_record_hash = self._last_hash
             payload = json.dumps(
                 _to_jsonable(record, exclude={"record_hash"}),
-                separators=(",", ":"), sort_keys=True,
+                separators=(",", ":"), sort_keys=True, default=_json_default,
             ).encode("utf-8")
             record.record_hash = "sha256:" + hashlib.sha256(payload).hexdigest()
             self._last_hash = record.record_hash
@@ -179,6 +180,42 @@ class AuditLogger:
     def close(self) -> None:
         for s in self.sinks:
             s.close()
+
+
+def _json_default(o):
+    """json.dumps `default=` — handles datetime, date, Decimal, bytes,
+    UUID, Path, Enum, dataclass — anything else falls through to repr().
+    Audit records can contain any DB-driver-native type as a sample value,
+    so we have to handle a wide variety."""
+    import datetime as _dt
+    import decimal as _dec
+    import enum as _enum
+    import pathlib as _path
+    import uuid as _uuid
+    from dataclasses import asdict, is_dataclass
+
+    if isinstance(o, (_dt.datetime, _dt.date, _dt.time)):
+        return o.isoformat()
+    if isinstance(o, _dt.timedelta):
+        return o.total_seconds()
+    if isinstance(o, _dec.Decimal):
+        return str(o)
+    if isinstance(o, (bytes, bytearray)):
+        try:
+            return o.decode("utf-8", errors="replace")
+        except Exception:
+            return repr(o)
+    if isinstance(o, _uuid.UUID):
+        return str(o)
+    if isinstance(o, _path.PurePath):
+        return str(o)
+    if isinstance(o, _enum.Enum):
+        return o.value
+    if isinstance(o, set):
+        return sorted(o)
+    if is_dataclass(o):
+        return asdict(o)
+    return repr(o)
 
 
 def _to_jsonable(record: AuditRecord, exclude: set[str] | None = None) -> dict[str, Any]:

@@ -28,6 +28,14 @@ def test_free_text_default_does_not_apply_to_short_varchar():
     assert cat.tier_for("users.tier", "VARCHAR(16)", "gold") == "allow"
 
 
+def test_free_text_default_is_off_unless_opted_in():
+    """The default catalog does NOT auto-mask anything via the free-text
+    heuristic — operators must opt in per-connection."""
+    cat = SensitivityCatalog()   # uses default tier = "allow"
+    assert cat.tier_for("users.notes", "TEXT", "long body") == "allow"
+    assert cat.tier_for("any.column", "VARCHAR", "anything") == "allow"
+
+
 def test_exempt_free_text_columns_pass_through():
     cat = SensitivityCatalog(
         free_text_default_tier="redact",

@@ -5,20 +5,30 @@ description = "Touchstone core — connectors, QA capabilities, security primiti
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
+authors = [{name = "The Touchstone Contributors"}]
+keywords = ["mcp", "qa", "data-quality", "database", "ai", "security", "pii"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+# Minimal dependencies — only what touchstone-core directly imports at the
+# top level. Engine-specific drivers go in optional-dependencies. Heavy
+# transitive deps (cryptography, presidio, transformers) are also extras.
 dependencies = [
     "sqlglot>=25.0",
     "sqlalchemy>=2.0",
-    "pydantic>=2.7",
-    "pydantic-settings>=2.4",
-    "structlog>=24.1",
     "rich>=13.7",
-    "tomli>=2.0; python_version < '3.11'",
     "tomli-w>=1.0",
     "keyring>=25.0",
-    "blake3>=0.4",
-    "tdigest>=0.5",
-    "datasketch>=1.6",          # HyperLogLog
-    "casbin>=1.36",             # policy engine
     "pyyaml>=6.0",
 ]
 
@@ -34,11 +44,14 @@ trino = ["trino>=0.328"]
 clickhouse = ["clickhouse-connect>=0.7"]
 duckdb = ["duckdb>=1.0"]
 pii = ["presidio-analyzer>=2.2", "spacy>=3.7"]
-web = ["playwright>=1.45"]
+pii-local-ner = ["transformers>=4.40", "torch>=2.0"]
+web = ["playwright>=1.45", "cryptography>=42.0"]
 llm-anthropic = ["anthropic>=0.40"]
 llm-openai = ["openai>=1.50"]
 llm-vertex = ["google-genai>=0.4"]
 llm-bedrock = ["boto3>=1.34"]
+# Convenience bundles
+quickstart = ["touchstone-core[postgres,duckdb,web]"]
 all = [
     "touchstone-core[postgres,mysql,snowflake,bigquery,mongodb,databricks,redshift,trino,clickhouse,duckdb,pii,web,llm-anthropic,llm-openai]",
 ]

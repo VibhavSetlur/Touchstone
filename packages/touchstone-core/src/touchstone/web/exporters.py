@@ -54,39 +54,70 @@ def export_via_browser(page: Any, export_url: str, *, format: str = "csv",
 
 
 # -- Per-tool helpers -----------------------------------------------------
+#
+# Each helper returns the URL appropriate for the BI tool's CSV / JSON
+# export. Where a URL pattern varies by version or deployment, we use the
+# most-common current-supported-major form and document the variants so
+# operators can override via the lower-level `export_via_browser`.
+#
+# Coverage notes (verified against vendor docs as of 2026-06):
+#   Looker     — `look/{id}.csv` is the stable per-look export; for tile
+#                exports from a dashboard, prefer the look URL when possible.
+#   Tableau    — `<view_url>.csv` works on Cloud / Server 2019.4+.
+#   Grafana    — render plugin must be installed for /render/d-csv/.
+#                Alternative: data-source proxy + manual JSON→CSV.
+#   Metabase   — /api/card/<id>/query/csv since v0.41.
+#   Superset   — /api/v1/chart/<id>/data/?format=csv since v1.5.
+
 
 def looker_dashboard_csv_url(dashboard_url: str, element_id: int | str) -> str:
-    """Looker's per-tile CSV export. The URL pattern is stable across Looker
-    versions; the dashboard URL gives us the host."""
+    """Looker per-look CSV: `/looks/{id}.csv`.
+
+    This is the most stable Looker export endpoint — works on Looker Original
+    and current Looker by Google Cloud. For tiles that aren't look-backed
+    (raw query tiles), the path differs and operators should use the
+    Looker REST API `look.run_look_inline_query` directly (planned
+    `looker_api_query` exporter).
+    """
     p = urlparse(dashboard_url)
-    return f"{p.scheme}://{p.netloc}/dashboards/elements/{element_id}/csv"
+    return f"{p.scheme}://{p.netloc}/looks/{element_id}.csv"
 
 
 def tableau_view_csv_url(view_url: str) -> str:
-    """Tableau Server / Tableau Cloud `?format=csv` data export.
+    """Tableau Cloud / Server view CSV: append `.csv` to the view URL.
 
-    Some Tableau deployments require the view URL to end in `:embed=y`
-    before `?format=csv` is honored; we tolerate both shapes.
+    Works on Tableau Cloud and Tableau Server 2019.4+. Some auth proxies
+    require `:embed=y` in the URL before `.csv` is honored.
+    Workbook-level CSV requires the Tableau REST API (planned).
     """
-    if "?" in view_url:
-        sep = "&"
-    else:
-        sep = "?"
-    return f"{view_url}{sep}:format=csv"
+    base = view_url.split("?", 1)[0].rstrip("/")
+    qs = view_url.split("?", 1)[1] if "?" in view_url else ""
+    return f"{base}.csv" + (f"?{qs}" if qs else "")
 
 
 def grafana_panel_csv_url(grafana_base: str, dashboard_uid: str,
                           panel_id: int, *, from_: str = "now-7d", to: str = "now") -> str:
-    """Grafana 10+ supports CSV export via the API panel render endpoint."""
+    """Grafana per-panel CSV via the render endpoint.
+
+    Requires Grafana Image Renderer plugin to be installed. If not
+    installed, the request returns HTML; fall back to a direct
+    data-source query via `/api/ds/query`.
+    """
+    base = grafana_base.rstrip("/")
     return (
-        f"{grafana_base.rstrip('/')}/api/datasources/proxy/uid/{dashboard_uid}"
-        f"/query?panelId={panel_id}&from={from_}&to={to}&format=csv"
+        f"{base}/render/d-csv/{dashboard_uid}/"
+        f"?panelId={panel_id}&from={from_}&to={to}"
     )
 
 
 def metabase_card_csv_url(metabase_base: str, card_id: int) -> str:
-    """Metabase has a clean /api/card/<id>/query/csv endpoint."""
+    """Metabase per-card CSV. Stable since v0.41."""
     return f"{metabase_base.rstrip('/')}/api/card/{card_id}/query/csv"
+
+
+def superset_chart_csv_url(superset_base: str, slice_id: int) -> str:
+    """Apache Superset chart CSV. Works on Superset 1.5+."""
+    return f"{superset_base.rstrip('/')}/api/v1/chart/{slice_id}/data/?format=csv"
 
 
 # Registry the AI / playbooks can call by name.
@@ -95,4 +126,5 @@ EXPORTERS = {
     "tableau_view_csv": tableau_view_csv_url,
     "grafana_panel_csv": grafana_panel_csv_url,
     "metabase_card_csv": metabase_card_csv_url,
+    "superset_chart_csv": superset_chart_csv_url,
 }

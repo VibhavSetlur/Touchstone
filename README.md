@@ -72,23 +72,53 @@ any credentials**.
 | `touchstone-github`          | Probot GitHub App for PR comments + check runs.                            | Alpha |
 | `touchstone-ui`              | Next.js triage UI: audit explorer, consent queue, lineage view.            | Alpha |
 
-## Quickstart
+## Install
 
-### Run as an MCP server for Claude Code / Copilot / Cursor
+Touchstone is not yet on PyPI — install from this repo:
 
 ```bash
-pipx install touchstone-mcp
-touchstone init                # interactive wizard — picks up local DBs and files
+# One-line installer (picks uv → pipx → pip automatically):
+curl -fsSL https://raw.githubusercontent.com/VibhavSetlur/Touchstone/main/install.sh | bash
+
+# Or clone + Makefile:
+git clone https://github.com/VibhavSetlur/Touchstone.git
+cd Touchstone
+make install        # quickstart bundle: Postgres + DuckDB + web automation
+# Or: make install-all  for every connector + LLM provider
+
+# Or directly with pip:
+pip install -e packages/touchstone-core[quickstart]
+pip install -e packages/touchstone-mcp
+pip install -e packages/touchstone-cli
 ```
 
-Add to `~/.claude/mcp_servers.json` (Cursor / Continue / Copilot have similar files):
+Verify:
+
+```bash
+touchstone --version
+touchstone init                # interactive wizard
+touchstone doctor              # diagnose your setup
+```
+
+A real 5-minute end-to-end path lives in [`GETTING-STARTED.md`](GETTING-STARTED.md).
+
+## Wire into your AI assistant
+
+| Assistant | Doc | Config file |
+|---|---|---|
+| **Claude Code** | [`docs/integrations/claude-code.md`](docs/integrations/claude-code.md) | `~/.claude/mcp_servers.json` |
+| **Cursor** | [`docs/integrations/cursor.md`](docs/integrations/cursor.md) | `~/.cursor/mcp.json` |
+| **Continue** | [`docs/integrations/continue.md`](docs/integrations/continue.md) | `~/.continue/config.yaml` |
+| **GitHub Copilot** | [`docs/integrations/github-copilot.md`](docs/integrations/github-copilot.md) | VS Code `settings.json` |
+
+The Claude Code config looks like:
 
 ```json
 {
   "mcpServers": {
     "touchstone": {
       "command": "touchstone-mcp",
-      "args": ["--config", "~/.touchstone/config.toml"],
+      "args": ["--config", "/Users/YOU/.touchstone/config.toml"],
       "env": {"TOUCHSTONE_ASSISTANT_ID": "claude-code@me@acme"}
     }
   }
